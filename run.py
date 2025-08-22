@@ -1,2 +1,1 @@
-import matplotlib.pyplot as plt
-print(matplotlib.__version__)
+where 
