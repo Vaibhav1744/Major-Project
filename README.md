@@ -27,25 +27,4 @@ To run the app, type following command in terminal.
 - Keras
 
 
-## Screenshots
-
-![app · Streamlit - Google Chrome 28-04-2022 18_08_18 (2)](https://user-images.githubusercontent.com/72250606/165754362-8e0dec51-c42a-4efe-8215-b6cc8c23923c.png)
-![Video 28-04-2022 18_09_52](https://user-images.githubusercontent.com/72250606/165754424-492954ca-666e-4430-8504-5d93a5a041ab.png)
-![Video 28-04-2022 18_09_57](https://user-images.githubusercontent.com/72250606/165754428-6c22b327-c9a2-401a-8f19-d1838c201777.png)
-![Video 28-04-2022 18_09_47](https://user-images.githubusercontent.com/72250606/165754415-3a4559e7-2338-4591-b1dc-159436eeebc4.png)
-
-## Demo video
-
- [Emotion based music recommendation system](https://youtu.be/eSBsY4WwgGw)
- 
-
-## Authors
-
-- [Udhay Brahmi](https://github.com/Udhay-Brahmi)
-
-
-
-## Support
-
-For support, email udhaybrahmi786@gmail.com or udhaybrahmi@gmail.com.
 
