@@ -1,9 +1,23 @@
 # app.py
+"""
+Emotion Music App — updated full version
+Features:
+- Login / Register / Onboarding (simple fallback auth included)
+- Face emotion detection (MTCNN fallback to Haar cascade)
+- Live webcam preview inside Streamlit while scanning
+- Voice recording/upload + waveform visualization
+- Face+Voice fusion with adjustable weights
+- Mood-improvement prompt and YouTube recommendations (optional API)
+- Sidebar Reset / status + preferences
+Requirements (example):
+pip install streamlit opencv-python-headless tensorflow librosa sounddevice wavio python-dotenv google-api-python-client matplotlib mtcnn
+"""
 import os
 import time
 import random
 import logging
 from collections import Counter
+import io
 
 import numpy as np
 import streamlit as st
@@ -12,8 +26,9 @@ import librosa
 import sounddevice as sd
 import wavio
 from dotenv import load_dotenv
+import matplotlib.pyplot as plt
 
-# streamlit must configure page before other Streamlit calls
+# Streamlit config — must be before other Streamlit calls
 st.set_page_config(page_title="Emotion Music App", page_icon="🎵", layout="wide")
 
 # ML libs
@@ -27,7 +42,7 @@ try:
 except Exception:
     MTCNN_AVAILABLE = False
 
-# Optional external modules from your project
+# Optional external modules (auth/db)
 try:
     from auth import register_user, login_user
     from database import users_collection
@@ -35,18 +50,18 @@ try:
 except Exception:
     AUTH_AVAILABLE = False
 
-# If google API is available, we'll try to use it (YOUTUBE_API_KEY in .env)
+# YouTube API optional
 try:
     from googleapiclient.discovery import build
     GOOGLEAPI_AVAILABLE = True
 except Exception:
     GOOGLEAPI_AVAILABLE = False
 
-# logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("emotion-music")
 
-# load env
+# Load .env
 load_dotenv()
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 youtube = None
@@ -58,10 +73,9 @@ if YOUTUBE_API_KEY and GOOGLEAPI_AVAILABLE:
         youtube = None
 
 # -------------------------
-# Fallback simple auth (if your auth module missing)
+# Fallback auth
 # -------------------------
 if not AUTH_AVAILABLE:
-    # in-memory user store (for dev/testing)
     _USERS = {}
     def register_user(email, username, password):
         if username in _USERS:
@@ -81,16 +95,11 @@ if not AUTH_AVAILABLE:
     users_collection = _DummyCol()
 
 # -------------------------
-# Emotion mappings
+# Emotion dictionaries
 # -------------------------
 FACE_EMOTION_DICT = {
-    0: "Angry",
-    1: "Disgusted",
-    2: "Fearful",
-    3: "Happy",
-    4: "Neutral",
-    5: "Sad",
-    6: "Surprised"
+    0: "Angry", 1: "Disgusted", 2: "Fearful", 3: "Happy",
+    4: "Neutral", 5: "Sad", 6: "Surprised"
 }
 
 VOICE_EMOTION_DICT_14 = {
@@ -118,36 +127,24 @@ MOOD_IMPROVEMENT_MAP = {
 }
 
 # -------------------------
-# Session-state defaults
+# Session defaults
 # -------------------------
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-if 'user' not in st.session_state:
-    st.session_state.user = None
-if 'page' not in st.session_state:
-    st.session_state.page = 'login'
-if 'emotion_list' not in st.session_state:
-    st.session_state.emotion_list = []
-if 'voice_label' not in st.session_state:
-    st.session_state.voice_label = None
-if 'voice_common' not in st.session_state:
-    st.session_state.voice_common = None
-if 'voice_conf' not in st.session_state:
-    st.session_state.voice_conf = None
-if 'voice_debug' not in st.session_state:
-    st.session_state.voice_debug = None
-if 'current_songs' not in st.session_state:
-    st.session_state.current_songs = []
-if 'playlist_url' not in st.session_state:
-    st.session_state.playlist_url = None
-if 'mood_choice' not in st.session_state:
-    st.session_state.mood_choice = None
+if 'logged_in' not in st.session_state: st.session_state.logged_in = False
+if 'user' not in st.session_state: st.session_state.user = None
+if 'page' not in st.session_state: st.session_state.page = 'login'
+if 'emotion_list' not in st.session_state: st.session_state.emotion_list = []
+if 'voice_label' not in st.session_state: st.session_state.voice_label = None
+if 'voice_common' not in st.session_state: st.session_state.voice_common = None
+if 'voice_conf' not in st.session_state: st.session_state.voice_conf = None
+if 'voice_debug' not in st.session_state: st.session_state.voice_debug = None
+if 'current_songs' not in st.session_state: st.session_state.current_songs = []
+if 'playlist_url' not in st.session_state: st.session_state.playlist_url = None
+if 'mood_choice' not in st.session_state: st.session_state.mood_choice = None
 if 'preferences' not in st.session_state:
-    # default preferences (overwritten by onboarding if user saved)
     st.session_state.preferences = {"song_type":"Pop","language":"English"}
 
 # -------------------------
-# Cached model loaders
+# Model loaders (cached)
 # -------------------------
 @st.cache_resource
 def load_face_emotion_model(path="model.h5"):
@@ -164,7 +161,7 @@ def load_face_emotion_model(path="model.h5"):
         MaxPooling2D(pool_size=(2,2)),
         Conv2D(128, kernel_size=(3,3), activation='relu'),
         MaxPooling2D(pool_size=(2,2)),
-        Dropout(0,25) if False else Dropout(0.25),  # ensures consistent placement
+        Dropout(0.25),
         Flatten(),
         Dense(1024, activation='relu'),
         Dropout(0.5),
@@ -192,7 +189,7 @@ def load_voice_model(path="Emotions_Model.h5"):
         return None
 
 # -------------------------
-# Voice feature pipeline (robust)
+# Voice feature pipeline (improved)
 # -------------------------
 def pre_emphasize(y, coef=0.97):
     if y.size == 0:
@@ -221,10 +218,14 @@ def compute_first_pc(feature_matrix):
         return np.mean(feature_matrix, axis=0)
 
 def extract_voice_features_improved(path, sr_target=16000, n_mfcc=40, target_len=216, pre_emph=True, denoise=True):
+    """Return (features, debug) where debug includes original waveform for plotting."""
     y, sr = librosa.load(path, sr=sr_target, mono=True)
-    if y.size == 0: y = np.zeros(int(sr_target*2.0), dtype=np.float32)
-    if pre_emph: y = pre_emphasize(y, coef=0.97)
-    if denoise: y = audio_denoise_simple(y)
+    if y.size == 0:
+        y = np.zeros(int(sr_target*2.0), dtype=np.float32)
+    if pre_emph:
+        y = pre_emphasize(y, coef=0.97)
+    if denoise:
+        y = audio_denoise_simple(y)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
     d1 = librosa.feature.delta(mfcc)
     d2 = librosa.feature.delta(mfcc, order=2)
@@ -238,7 +239,7 @@ def extract_voice_features_improved(path, sr_target=16000, n_mfcc=40, target_len
     if np.std(seq) > 1e-6:
         seq = (seq - np.mean(seq)) / (np.std(seq) + 1e-9)
     x = seq.reshape(1, target_len, 1).astype(np.float32)
-    debug = {"sr": sr, "orig_len": len(y), "stacked_shape": stacked.shape, "final_shape": x.shape}
+    debug = {"sr": sr, "orig_len": len(y), "stacked_shape": stacked.shape, "final_shape": x.shape, "waveform": y}
     return x, debug
 
 def voice_predict_smoothed(vmodel, audio_path, cfg):
@@ -400,27 +401,59 @@ def show_onboarding_page():
         st.experimental_rerun()
 
 # -------------------------
-# Main integrated app
+# Main integrated app (UI improved + features requested)
 # -------------------------
 def show_main_app():
     # load models on demand (cached)
     face_model = load_face_emotion_model()
     voice_model = load_voice_model()
 
-    st.title("Emotion Music — Face + Voice")
+    # Top bar + header area
+    st.markdown("<div style='display:flex; align-items:center; justify-content:space-between;'>"
+                "<h1>🎵 Emotion Music — Face + Voice</h1>"
+                f"<div style='text-align:right;'>User: <b>{st.session_state.user['username'] if st.session_state.user else 'Guest'}</b></div>"
+                "</div>", unsafe_allow_html=True)
+    st.write("---")
 
-    # Top preferences area (user & prefs)
-    colL, colR = st.columns([3,1])
-    with colL:
-        st.markdown("<h3 style='text-align:left;'>Emotion-Based Music Recommendation</h3>", unsafe_allow_html=True)
-        st.write("Preferences (edit here):")
-        # show and allow quick edits (keeps preferences on top)
+    # Sidebar (top) controls + reset
+    st.sidebar.title("Controls & Status")
+    if st.sidebar.button("🔄 Clear All / Reset"):
+        st.session_state.emotion_list = []
+        st.session_state.voice_label = None
+        st.session_state.voice_common = None
+        st.session_state.voice_conf = None
+        st.session_state.voice_debug = None
+        st.session_state.current_songs = []
+        st.session_state.playlist_url = None
+        st.session_state.mood_choice = None
+        st.success("Reset complete")
+        st.experimental_rerun()
+
+    # Show current mood + last detected emotion in sidebar
+    st.sidebar.subheader("Current Status")
+    last_emotion = st.session_state.emotion_list[-1] if st.session_state.emotion_list else "None"
+    st.sidebar.write(f"**Last Detected Emotion:** {last_emotion}")
+    st.sidebar.write(f"**Current Mood Choice:** {st.session_state.mood_choice if st.session_state.mood_choice else 'None'}")
+
+    # Advanced voice settings hidden in sidebar expander
+    with st.sidebar.expander("🎙 Advanced Voice Input Settings (click to open)", expanded=False):
+        n_mfcc = st.slider("MFCC (n_mfcc)", 13, 60, 40)
+        pre_emph = st.checkbox("Apply pre-emphasis (voice)", value=True)
+        denoise_opt = st.checkbox("Apply simple denoise", value=True)
+        target_len = st.slider("Voice timesteps (target_len)", 120, 300, 216)
+        w_face = st.slider("Face weight (fusion)", 0.0, 1.0, 0.6)
+        w_voice = st.slider("Voice weight (fusion)", 0.0, 1.0, 0.4)
+
+    # Preferences & quick actions row
+    prefs_col, right_col = st.columns([3,1])
+    with prefs_col:
+        st.markdown("### Preferences")
+        st.write("Edit quick preferences (saved locally in session).")
         song_type = st.selectbox("Preferred song type", ["Devotional","Romantic","Indie","Pop","Rock"], index=["Devotional","Romantic","Indie","Pop","Rock"].index(st.session_state.preferences.get("song_type","Pop")))
         language = st.selectbox("Preferred language", ["Hindi","English","Others"], index=["Hindi","English","Others"].index(st.session_state.preferences.get("language","English")))
         st.session_state.preferences["song_type"] = song_type
         st.session_state.preferences["language"] = language
-    with colR:
-        st.write(f"**User:** {st.session_state.user['username'] if st.session_state.user else 'Guest'}")
+    with right_col:
         if st.button("Logout"):
             st.session_state.logged_in = False
             st.session_state.user = None
@@ -432,50 +465,73 @@ def show_main_app():
             st.session_state.voice_conf = None
             st.experimental_rerun()
 
-    # Sidebar: simplified controls + fusion weights
-    st.sidebar.header("Controls & Settings")
-    detection_mode = st.sidebar.radio("Detection mode", ("Auto (Face + Voice)", "Face only", "Voice only", "Manual"))
-    show_snapshot = st.sidebar.checkbox("Show final snapshot after face scan", value=False)
-    n_mfcc = st.sidebar.slider("MFCC (n_mfcc)", 13, 60, 40)
-    pre_emph = st.sidebar.checkbox("Apply pre-emphasis (voice)", value=True)
-    denoise_opt = st.sidebar.checkbox("Apply simple denoise", value=True)
-    target_len = st.sidebar.slider("Voice timesteps (target_len)", 120, 300, 216)
-    w_face = st.sidebar.slider("Face weight (fusion)", 0.0, 1.0, 0.6)
-    w_voice = st.sidebar.slider("Voice weight (fusion)", 0.0, 1.0, 0.4)
+    st.write("---")
 
-    # Manual dropdown (top-level fallback)
+    # Detection mode and preview area
+    settings_col, info_col = st.columns([1,2])
+    with settings_col:
+        st.header("Settings")
+        detection_mode = st.radio("Detection mode", ("Auto (Face + Voice)", "Face only", "Voice only", "Manual"))
+        show_snapshot = st.checkbox("Show final snapshot after face scan", value=False)
+        # If advanced settings expander was not opened, still ensure variables exist with defaults
+        if 'n_mfcc' not in locals():
+            n_mfcc = 40
+        if 'pre_emph' not in locals():
+            pre_emph = True
+        if 'denoise_opt' not in locals():
+            denoise_opt = True
+        if 'target_len' not in locals():
+            target_len = 216
+        if 'w_face' not in locals():
+            w_face = 0.6
+        if 'w_voice' not in locals():
+            w_voice = 0.4
+
+    with info_col:
+        st.header("Status")
+        st.write("Last face emotions collected:", st.session_state.emotion_list[-10:] if st.session_state.emotion_list else "None yet")
+        st.write("Last voice label:", st.session_state.voice_label if st.session_state.voice_label else "None yet")
+        st.write("Last voice common emotion:", st.session_state.voice_common if st.session_state.voice_common else "None yet")
+
+    st.write("---")
+
+    # Manual selection
     st.subheader("Manual emotion (optional)")
     manual_emotion = st.selectbox("Select emotion manually (overrides scans if chosen):", ["None"] + COMMON_EMOTIONS)
     if manual_emotion != "None" and st.button("Use Manual Emotion"):
         st.session_state.emotion_list = [manual_emotion]
         st.success(f"Manual emotion set to: {manual_emotion}")
 
-    # Face scanning area
+    # Face scanning area — uses live capture loop to append multiple frames (no external window)
     st.subheader("Step 1 — Face Emotion Scan")
     face_col, voice_col = st.columns(2)
     final_snapshot = None
     with face_col:
+        st.write("Press 'Scan Face Emotion' to capture ~30 frames from webcam and run predictions on detected faces. A live preview will show during scanning.")
         if st.button("Scan Face Emotion"):
             if face_model is None:
                 st.error("Face model (model.h5) not found or failed to load. Place it in the project folder.")
             else:
-                # choose detector
+                # select detector
                 detector = None
                 if MTCNN_AVAILABLE:
                     detector = MTCNN()
                 else:
-                    # fallback to Haar Cascade
                     haar_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
                     detector = cv2.CascadeClassifier(haar_path)
                 cap = cv2.VideoCapture(0)
-                face_emotions = []
-                frames = 0
+                collected_emotions = []
+                preview_slot = st.empty()
                 with st.spinner("Scanning face — keep your face visible to the camera..."):
-                    while frames < 28:
+                    frames = 0
+                    while frames < 30:
                         ret, frame = cap.read()
                         if not ret:
-                            break
+                            frames += 1
+                            time.sleep(0.03)
+                            continue
                         frames += 1
+                        display_frame = frame.copy()
                         try:
                             if MTCNN_AVAILABLE:
                                 faces = detector.detect_faces(frame)
@@ -494,15 +550,20 @@ def show_main_app():
                                 arr = arr.reshape(1,48,48,1)
                                 preds = face_model.predict(arr, verbose=0)
                                 lab = FACE_EMOTION_DICT[int(np.argmax(preds))]
-                                face_emotions.append(lab)
+                                collected_emotions.append(lab)
+                                # annotate display_frame
+                                cv2.rectangle(display_frame, (x,y), (x+w,y+h), (0,255,0), 2)
+                                cv2.putText(display_frame, lab, (x, max(y-8, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (36,255,12), 2)
                                 final_snapshot = frame.copy()
                         except Exception as e:
                             logger.debug("Face detect/predict error: %s", e)
+                        # show a live frame in the UI
+                        preview_slot.image(cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB), channels="RGB")
                         time.sleep(0.03)
                 cap.release()
-                if face_emotions:
-                    st.session_state.emotion_list = st.session_state.emotion_list + face_emotions
-                    st.success(f"Face scan complete — {len(face_emotions)} frames detected.")
+                if collected_emotions:
+                    st.session_state.emotion_list = st.session_state.emotion_list + collected_emotions
+                    st.success(f"Face scan complete — {len(collected_emotions)} frames detected.")
                     if show_snapshot and final_snapshot is not None:
                         st.image(cv2.cvtColor(final_snapshot, cv2.COLOR_BGR2RGB), caption="Final snapshot from scan", use_container_width=True)
                 else:
@@ -511,6 +572,7 @@ def show_main_app():
     # Voice scanning area
     with voice_col:
         st.subheader("Step 2 — Voice Emotion Scan")
+        st.write("Record or upload a WAV file. After detection, a waveform will be shown.")
         rec_dur = st.number_input("Recording duration (seconds)", min_value=2, max_value=8, value=4, step=1)
         if st.button("🎤 Record Voice Now"):
             tmp = record_audio_to_file(duration=int(rec_dur), fs=16000, out="voice_input.wav")
@@ -533,8 +595,18 @@ def show_main_app():
                             st.session_state.emotion_list = st.session_state.emotion_list + [common]
                         st.audio(tmp, format="audio/wav")
                         st.success(f"Voice -> {raw_label} ({common}) conf={conf:.3f}")
+                        # Plot waveform
+                        waveform = dbg.get("waveform", None)
+                        if waveform is not None:
+                            fig, ax = plt.subplots(figsize=(6,2))
+                            ax.plot(np.linspace(0, len(waveform)/dbg['sr'], num=len(waveform)), waveform)
+                            ax.set_xlabel("Seconds")
+                            ax.set_ylabel("Amplitude")
+                            ax.set_title("Recorded Waveform")
+                            st.pyplot(fig)
                     except Exception as e:
                         st.error(f"Voice prediction failed: {e}")
+
         uploaded = st.file_uploader("Or upload a WAV file", type=["wav"])
         if uploaded is not None:
             tmpf = "uploaded_voice.wav"
@@ -546,27 +618,34 @@ def show_main_app():
                 st.error("Voice model not available.")
             else:
                 cfg = {"n_mfcc": n_mfcc, "pre_emph": pre_emph, "denoise": denoise_opt, "target_len": target_len}
-                idx, conf, dbg, avg = voice_predict_smoothed(vmodel, tmpf, cfg)
-                raw_label = VOICE_EMOTION_DICT_14.get(idx, f"Unknown({idx})")
-                common = VOICE_TO_COMMON.get(raw_label, None)
-                st.session_state.voice_label = raw_label
-                st.session_state.voice_common = common
-                st.session_state.voice_conf = conf
-                st.session_state.voice_debug = dbg
-                if common:
-                    st.session_state.emotion_list = st.session_state.emotion_list + [common]
-                st.success(f"Voice -> {raw_label} ({common}) conf={conf:.3f}")
-                if st.checkbox("Show voice debug info"):
-                    st.json(dbg)
+                try:
+                    idx, conf, dbg, avg = voice_predict_smoothed(vmodel, tmpf, cfg)
+                    raw_label = VOICE_EMOTION_DICT_14.get(idx, f"Unknown({idx})")
+                    common = VOICE_TO_COMMON.get(raw_label, None)
+                    st.session_state.voice_label = raw_label
+                    st.session_state.voice_common = common
+                    st.session_state.voice_conf = conf
+                    st.session_state.voice_debug = dbg
+                    if common:
+                        st.session_state.emotion_list = st.session_state.emotion_list + [common]
+                    st.success(f"Voice -> {raw_label} ({common}) conf={conf:.3f}")
+                    # waveform
+                    waveform = dbg.get("waveform", None)
+                    if waveform is not None:
+                        fig, ax = plt.subplots(figsize=(6,2))
+                        ax.plot(np.linspace(0, len(waveform)/dbg['sr'], num=len(waveform)), waveform)
+                        ax.set_xlabel("Seconds")
+                        ax.set_ylabel("Amplitude")
+                        ax.set_title("Uploaded Waveform")
+                        st.pyplot(fig)
+                    if st.checkbox("Show voice debug info"):
+                        st.json(dbg)
+                except Exception as e:
+                    st.error(f"Voice prediction failed: {e}")
 
     # ---- Step 3: Fusion / Manual / Mode handling
     st.subheader("Step 3 — Final emotion (fusion / manual)")
     driving_emotion = None
-
-    # If manual selected at top, use it (override)
-    if manual_emotion != "None" and st.session_state.emotion_list:
-        # If user selected manual and also scans appended, manual button sets session list; we keep scanned list if manual not explicitly used
-        pass
 
     # Choose final based on detection_mode
     if detection_mode == "Manual":
@@ -576,7 +655,7 @@ def show_main_app():
         else:
             st.info("Manual mode selected: choose an emotion from the dropdown and click 'Use Manual Emotion' above.")
     else:
-        # Build face_scores and voice_scores
+        # For Auto mode we require both at least one face detection AND voice detection before suggestions
         face_scores = get_face_scores([e for e in st.session_state.emotion_list if e in COMMON_EMOTIONS]) if st.session_state.emotion_list else {e:0.0 for e in COMMON_EMOTIONS}
         voice_scores = get_voice_scores(st.session_state.voice_common, st.session_state.voice_conf) if st.session_state.voice_common else {e:0.0 for e in COMMON_EMOTIONS}
 
@@ -585,17 +664,25 @@ def show_main_app():
         elif detection_mode == "Voice only":
             driving_emotion = st.session_state.voice_common
         else:  # Auto (Face + Voice)
-            best, fused = fuse_emotions(face_scores, voice_scores, w_face=float(w_face), w_voice=float(w_voice))
-            driving_emotion = best
-            with st.expander("Fusion details (face / voice / fused)"):
-                st.write("Face scores:", face_scores)
-                st.write("Voice scores:", voice_scores)
-                st.json(fused)
+            # require both modalities present
+            if (not st.session_state.emotion_list) or (not st.session_state.voice_common):
+                st.info("Auto mode requires both face and voice scans. Run both scans to produce recommendations.")
+            else:
+                best, fused = fuse_emotions(face_scores, voice_scores, w_face=float(w_face), w_voice=float(w_voice))
+                driving_emotion = best
+                with st.expander("Fusion details (face / voice / fused)"):
+                    st.write("Face scores:", face_scores)
+                    st.write("Voice scores:", voice_scores)
+                    st.json(fused)
 
     if driving_emotion:
         st.success(f"Detected Emotion for music: **{driving_emotion}**")
+        # update last-detected in session state
+        if st.session_state.emotion_list == [] or (st.session_state.emotion_list and st.session_state.emotion_list[-1] != driving_emotion):
+            st.session_state.emotion_list = st.session_state.emotion_list + [driving_emotion]
     else:
-        st.info("No final emotion selected yet. Use Manual mode or run face/voice scans.")
+        # keep informative message if nothing yet
+        pass
 
     # Mood-improvement prompt and recommendation
     adjusted_song_type = None
@@ -611,6 +698,7 @@ def show_main_app():
     song_type_pref = st.session_state.preferences.get("song_type", "Pop")
     language_pref = st.session_state.preferences.get("language", "English")
 
+    # Only show recommendations if adjusted_song_type exists (i.e. user confirmed mood improvement)
     if adjusted_song_type:
         if not st.session_state.current_songs or st.button("Refresh Recommendations"):
             if youtube is None:
@@ -633,7 +721,8 @@ def show_main_app():
             st.subheader("Your Emotion-Based Playlist")
             st.components.v1.html(f'<iframe width="100%" height="315" src="{st.session_state.playlist_url}" frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>', height=340)
 
-    if st.button("Reset All"):
+    # Reset button at bottom as well
+    if st.button("Reset All (also clears session lists)"):
         st.session_state.emotion_list = []
         st.session_state.voice_label = None
         st.session_state.voice_common = None
@@ -646,7 +735,7 @@ def show_main_app():
         st.experimental_rerun()
 
 # -------------------------
-# Helper small wrappers used above
+# Helper wrappers
 # -------------------------
 def get_top_from_scores(scores_dict):
     if not scores_dict:
@@ -654,7 +743,6 @@ def get_top_from_scores(scores_dict):
     return max(scores_dict, key=scores_dict.get)
 
 def prompt_for_mood_improvement_ui(dominant_emotion):
-    # similar to earlier prompt_mood_improvement but separated to avoid confusion
     suggested_type = MOOD_IMPROVEMENT_MAP.get(dominant_emotion)
     default = st.session_state.preferences.get("song_type", "Pop")
     if dominant_emotion == "Neutral":
